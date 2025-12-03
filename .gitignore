@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+
+# Data files
+*.csv
+*.json
+*.xlsx
+
+# Screenshots
+*.png
+*.jpg
+
+# VS Code
+.vscode/
+
+# Desktop.ini
+desktop.ini
+
+# HTML debug files
+*.html
