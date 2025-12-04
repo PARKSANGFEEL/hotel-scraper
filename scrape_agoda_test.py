@@ -61,7 +61,7 @@ def scrape_agoda(checkin_date):
         print(f"총 {len(h4_elements)}개의 h4 태그 발견\n")
         
         results = []
-        processed_rooms = set()
+        processed_rooms = {}  # 이름 + 가격으로 중복 체크
         price_history = load_price_history()
         price_drops = []
         
@@ -70,29 +70,30 @@ def scrape_agoda(checkin_date):
                 room_name_raw = h4.text.strip()
                 room_name = clean_room_name(room_name_raw)
                 
-                # 디버깅: 처음 5개 h4 태그 내용 출력
-                if idx <= 5:
-                    print(f"[DEBUG {idx}] h4 내용: '{room_name_raw}'")
-                
-                if not any(kw in room_name for kw in ['룸', 'Room', 'Twin', 'Double', 'Deluxe', 'Family']):
+                if not any(kw in room_name for kw in ['룸', 'Room', 'Twin', 'Double', 'Deluxe', 'Family', '싱글']):
                     continue
-                
-                if room_name in processed_rooms:
-                    continue
-                processed_rooms.add(room_name)
                 
                 print(f"[{room_name}]")
                 
+                # h4의 바로 상위 요소부터 시작하여 가격 카드 찾기
                 current = h4
                 room_card = None
-                for _ in range(20):
+                
+                # 먼저 h4를 포함하는 가장 가까운 부모 컨테이너 찾기
+                for level in range(25):
                     try:
                         current = current.find_element(By.XPATH, '..')
-                        if current.find_element(By.CSS_SELECTOR, '[data-testid="crossed-out-price-text"]'):
-                            room_card = current
-                            break
+                        # 가격 정보를 포함한 카드 찾기
+                        try:
+                            crossed_out = current.find_element(By.CSS_SELECTOR, '[data-testid="crossed-out-price-text"]')
+                            # 해당 컨테이너에 h4가 포함되어 있는지 확인
+                            if h4.text in current.text:
+                                room_card = current
+                                break
+                        except:
+                            pass
                     except:
-                        pass
+                        break
                 
                 if not room_card:
                     print(f"  ✗ 객실 카드 못 찾음\n")
@@ -154,6 +155,13 @@ def scrape_agoda(checkin_date):
                 
                 # 가격 비교
                 if discounted_price and original_price:
+                    # 중복 체크 (같은 이름 + 같은 가격)
+                    room_key = f"{room_name}_{discounted_price}"
+                    if room_key in processed_rooms:
+                        print(f"  ⚠️ 중복 건너뜀\n")
+                        continue
+                    processed_rooms[room_key] = True
+                    
                     history_key = f"{checkin_date}_{room_name}"
                     if history_key in price_history:
                         prev_price = price_history[history_key]
@@ -216,13 +224,22 @@ def scrape_agoda(checkin_date):
                 rate = f"{item['discount_rate']}%" if item['discount_rate'] else "-"
                 print(f"{item['room_type']:<45} {orig:<12} {disc:<12} {save:<12} {rate:<8}")
         
-        csv_filename = os.path.join(OUTPUT_DIR, f"results_{checkin_date}_test.csv")  # 파일명 변경
+        csv_filename = os.path.join(OUTPUT_DIR, f"results_{checkin_date}_{datetime.now().strftime('%H%M%S')}.csv")
         print(f"\n결과를 CSV로 저장: {csv_filename}")
         with open(csv_filename, 'w', newline='', encoding='utf-8-sig') as csvfile:
             writer = csv.DictWriter(csvfile, 
                                    fieldnames=['room_type', 'original_price', 'discounted_price', 'savings', 'discount_rate'])
             writer.writeheader()
-            writer.writerows(results)
+            
+            # 포맷팅된 데이터 작성
+            for result in results:
+                writer.writerow({
+                    'room_type': result['room_type'],
+                    'original_price': f"₩{result['original_price']}" if result['original_price'] else "-",
+                    'discounted_price': f"₩{result['discounted_price']}" if result['discounted_price'] else "-",
+                    'savings': f"₩{result['savings']}" if result['savings'] else "-",
+                    'discount_rate': f"{result['discount_rate']}%" if result['discount_rate'] else "-"
+                })
 
         print(f"완료! {len(results)}개 객실 정보가 저장되었습니다.")
         
@@ -246,8 +263,40 @@ if __name__ == '__main__':
     print("🏨 Agoda 호텔 가격 수집 (테스트 모드)")
     print("="*80)
     
-    # 테스트할 날짜
-    test_date = "2026-01-04"
+    # 테스트할 날짜 입력 및 유효성 검사
+    from datetime import datetime, timedelta
+    
+    while True:
+        test_date = input("\n체크인 날짜를 입력하세요 (YYYY-MM-DD, 예: 2026-01-04): ").strip()
+        
+        if not test_date:
+            print("❌ 날짜를 입력해주세요.")
+            continue
+        
+        try:
+            # 날짜 형식 검증
+            input_date = datetime.strptime(test_date, "%Y-%m-%d")
+            today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            
+            # 과거 날짜 체크
+            if input_date < today:
+                print(f"❌ 과거 날짜는 입력할 수 없습니다. 오늘({today.strftime('%Y-%m-%d')}) 이후의 날짜를 입력하세요.")
+                continue
+            
+            # 너무 먼 미래 체크 (1년 이상)
+            one_year_later = today + timedelta(days=365)
+            if input_date > one_year_later:
+                print(f"⚠️ 1년 이상 먼 날짜입니다. 정말 진행하시겠습니까? (y/n): ", end="")
+                confirm = input().strip().lower()
+                if confirm != 'y':
+                    continue
+            
+            print(f"✅ 날짜 확인: {test_date}")
+            break
+            
+        except ValueError:
+            print("❌ 잘못된 날짜 형식입니다. YYYY-MM-DD 형식으로 입력하세요. (예: 2026-01-04)")
+            continue
     
     scrape_agoda(test_date)
     
