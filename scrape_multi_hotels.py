@@ -84,9 +84,10 @@ def scrape_hotel(hotel_id, hotel_info, checkin_date, driver):
                 
                 print(f"[{room_name}]")
                 
-                # 상위 컨테이너 찾기 - 객실 이름이 포함된 가장 작은 가격 컨테이너
+                # 상위 컨테이너 찾기 - 여러 후보를 수집하고 최적의 것 선택
                 current = h4
                 room_card = None
+                candidate_containers = []
                 
                 for level in range(40):
                     try:
@@ -108,11 +109,24 @@ def scrape_hotel(hotel_id, hotel_info, checkin_date, driver):
                                         break
                             
                             if not other_rooms_found:
-                                room_card = current
-                                break
+                                # span 개수 확인하여 후보로 추가
+                                spans_count = len(current.find_elements(By.TAG_NAME, 'span'))
+                                candidate_containers.append({
+                                    'level': level,
+                                    'element': current,
+                                    'spans_count': spans_count
+                                })
                     except:
                         break
                 
+                # span이 많은 컨테이너 선택 (가격 정보가 더 많을 가능성)
+                if candidate_containers:
+                    best_container = max(candidate_containers, key=lambda x: x['spans_count'])
+                    room_card = best_container['element']
+                
+                if not room_card:
+                    print(f"  ✗ 객실 카드 못 찾음\n")
+                    continue
                 if not room_card:
                     print(f"  ✗ 객실 카드 못 찾음\n")
                     continue
@@ -130,14 +144,38 @@ def scrape_hotel(hotel_id, hotel_info, checkin_date, driver):
                     print(f"  ✓ 할인율: {discount_rate}%")
                 
                 # 2. 할인가 찾기 (여러 방법 시도)
-                # 방법 A: iwOmxK span (가장 정확)
+                # 방법 A: rareFind 컨테이너에서 우선 검색 (특별 할인 객실)
+                if not discounted_price:
+                    try:
+                        rare_containers = room_card.find_elements(By.CSS_SELECTOR, 'div[class*="rareFind"]')
+                        for container in rare_containers:
+                            spans = container.find_elements(By.TAG_NAME, 'span')
+                            for span in spans:
+                                span_text = span.text.strip()
+                                # 숫자로 시작하는 span 찾기 (순수 숫자 또는 ₩ 포함)
+                                if span_text and re.search(r'^\d{3}', span_text):
+                                    match = re.search(r'₩?\s*([\d,]+)', span_text)
+                                    if match:
+                                        price = int(match.group(1).replace(',', ''))
+                                        if 10000 <= price <= 1000000:
+                                            discounted_price = price
+                                            print(f"  ✓ 할인가 (rareFind): ₩{discounted_price:,}")
+                                            break
+                            if discounted_price:
+                                break
+                    except:
+                        pass
+                
+                # 방법 B: iwOmxK span (일반 객실)
                 if not discounted_price:
                     try:
                         price_spans = room_card.find_elements(By.CSS_SELECTOR, 'span.iwOmxK')
                         for span in price_spans:
                             span_text = span.text.strip()
-                            if re.match(r'^[\d,]+$', span_text):
-                                price_val = int(span_text.replace(',', ''))
+                            # ₩ 기호가 있을 수도, 없을 수도 있음
+                            match = re.search(r'₩?\s*([\d,]+)', span_text)
+                            if match:
+                                price_val = int(match.group(1).replace(',', ''))
                                 if 10000 <= price_val <= 1000000:
                                     discounted_price = price_val
                                     print(f"  ✓ 할인가: ₩{discounted_price:,}")
@@ -145,7 +183,7 @@ def scrape_hotel(hotel_id, hotel_info, checkin_date, driver):
                     except:
                         pass
                 
-                # 방법 B: PriceDisplay 클래스 - 모든 span 검색
+                # 방법 C: PriceDisplay 클래스 - 모든 span 검색
                 if not discounted_price:
                     try:
                         all_spans = room_card.find_elements(By.TAG_NAME, 'span')
