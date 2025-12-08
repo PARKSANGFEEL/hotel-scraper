@@ -8,14 +8,14 @@ env/
 venv/
 ENV/
 
-# Data files
-*.csv
-*.json
-*.xlsx
+# Data files - 주석 처리하여 데이터 파일도 커밋에 포함
+# *.csv
+# *.json
+# *.xlsx
 
-# Screenshots
-*.png
-*.jpg
+# Screenshots - 주석 처리하여 스크린샷도 커밋에 포함
+# *.png
+# *.jpg
 
 # VS Code
 .vscode/
