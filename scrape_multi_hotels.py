@@ -187,18 +187,35 @@ def scrape_hotel(hotel_id, hotel_info, checkin_date, driver):
                 
                 # 2. 할인가 추출
                 # "₩ 123,456" 패턴 찾기
-                prices = re.findall(r'₩\s*([\d,]+)', card_text)
-                if prices:
-                    # 발견된 가격들 중 정수로 변환
-                    price_values = []
+                # 줄 단위로 분리하여 '월' 또는 'month'가 포함된 줄의 가격은 제외 (할부 가격 오인 방지)
+                lines = card_text.split('\n')
+                price_values = []
+                
+                for line in lines:
+                    # 할부/월 납입 관련 텍스트가 있는 줄은 건너뜀
+                    if any(x in line for x in ['월', 'month', 'installments', '또는']):
+                        continue
+                        
+                    found = re.findall(r'₩\s*([\d,]+)', line)
+                    for p in found:
+                        try:
+                            val = int(p.replace(',', ''))
+                            price_values.append(val)
+                        except:
+                            pass
+                
+                if not price_values:
+                     # Fallback: if strict filtering removed everything, try loose extraction
+                    prices = re.findall(r'₩\s*([\d,]+)', card_text)
                     for p in prices:
                         try:
                             val = int(p.replace(',', ''))
                             price_values.append(val)
                         except:
                             pass
-                    
-                    if price_values:
+
+                if price_values:
+                    # 발견된 가격들 중 정수로 변환
                         # 가장 낮은 가격을 할인가로 가정 (보통 큰 가격은 원가, 작은 가격은 할인가/세금제외가 등)
                         # 하지만 원가가 있으면 원가보다 작은 것 중 가장 큰 것이 할인가일 가능성 높음
                         # 여기서는 단순하게: 원가가 있으면 원가와 다른 값 중 하나, 없으면 값 중 하나
