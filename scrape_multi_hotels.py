@@ -58,8 +58,8 @@ def scrape_hotel(hotel_id, hotel_info, checkin_date, driver):
         
         print(f"URL 접속 중...")
         driver.get(url)
-        print(f"페이지 로딩 대기 중... (15초)")
-        time.sleep(15)
+        print("페이지 로딩 대기 중... (20초)")
+        time.sleep(20)
         
         print(f"페이지 스크롤하여 모든 콘텐츠 로드 중...")
         
@@ -174,14 +174,19 @@ def scrape_hotel(hotel_id, hotel_info, checkin_date, driver):
                 # 카드 내 텍스트에서 가격 추출
                 card_text = room_card.text
                 
-                # 1. 원가 추출 (취소선 가격)
+                # 1. 원가 추출 (취소선 가격) - 할부 가격 제외
                 try:
                     crossed_out = room_card.find_elements(By.CSS_SELECTOR, '[data-testid="crossed-out-price-text"], [data-testid="crossout-price"]')
                     if crossed_out:
                         original_price_text = crossed_out[0].text
-                        m = re.search(r'([\d,]+)', original_price_text)
-                        if m:
-                            original_price = int(m.group(1).replace(',', ''))
+                        # 할부 관련 텍스트 제외
+                        if not any(x in original_price_text for x in ['월', 'month', '또는', 'installment']):
+                            m = re.search(r'([\d,]+)', original_price_text)
+                            if m:
+                                price_candidate = int(m.group(1).replace(',', ''))
+                                # 10,000원 이상의 합리적인 가격만 원가로 인정
+                                if price_candidate >= 10000:
+                                    original_price = price_candidate
                 except:
                     pass
                 
@@ -193,14 +198,16 @@ def scrape_hotel(hotel_id, hotel_info, checkin_date, driver):
                 
                 for line in lines:
                     # 할부/월 납입 관련 텍스트가 있는 줄은 건너뜀
-                    if any(x in line for x in ['월', 'month', 'installments', '또는']):
+                    if any(x in line for x in ['월', 'month', 'installments', '또는', '부터', '개월']):
                         continue
                         
                     found = re.findall(r'₩\s*([\d,]+)', line)
                     for p in found:
                         try:
                             val = int(p.replace(',', ''))
-                            price_values.append(val)
+                            # 50,000원 미만은 할부 월 금액일 가능성 높음
+                            if val >= 50000:
+                                price_values.append(val)
                         except:
                             pass
                 
@@ -215,28 +222,26 @@ def scrape_hotel(hotel_id, hotel_info, checkin_date, driver):
                             pass
 
                 if price_values:
-                    # 발견된 가격들 중 정수로 변환
-                        # 가장 낮은 가격을 할인가로 가정 (보통 큰 가격은 원가, 작은 가격은 할인가/세금제외가 등)
-                        # 하지만 원가가 있으면 원가보다 작은 것 중 가장 큰 것이 할인가일 가능성 높음
-                        # 여기서는 단순하게: 원가가 있으면 원가와 다른 값 중 하나, 없으면 값 중 하나
-                        
-                        if original_price:
-                            candidates = [p for p in price_values if p < original_price]
-                            if candidates:
-                                discounted_price = max(candidates) # 너무 작은 값(세금 등) 제외하기 위해 max? 아니면 min? 보통 메인 가격은 큼.
-                            else:
-                                discounted_price = min(price_values) # 원가보다 큰 가격은 없을테니
+                    # 중복 제거 및 정렬
+                    price_values = sorted(list(set(price_values)), reverse=True)
+                    
+                    if original_price:
+                        # 원가가 있는 경우: 원가보다 작은 가격 중 가장 큰 값이 할인가
+                        candidates = [p for p in price_values if p < original_price and p != original_price]
+                        if candidates:
+                            discounted_price = max(candidates)
                         else:
-                            # 원가를 못 찾았으면, 가격 중 가장 큰 것을 원가로, 그 다음을 할인가로?
-                            # 보통 "₩ 200,000 -> ₩ 150,000" 형식이면 둘 다 잡힘.
-                            # 하나만 잡히면 그게 할인가.
-                            price_values.sort(reverse=True)
-                            if len(price_values) >= 2:
-                                original_price = price_values[0]
-                                discounted_price = price_values[1]
-                            else:
-                                discounted_price = price_values[0]
-                                original_price = discounted_price
+                            # 원가보다 작은 가격이 없으면 가장 작은 가격을 할인가로
+                            discounted_price = min(price_values)
+                    else:
+                        # 원가가 없는 경우: 가격이 2개 이상이면 큰 값=원가, 작은 값=할인가
+                        if len(price_values) >= 2:
+                            original_price = price_values[0]
+                            discounted_price = price_values[1]
+                        else:
+                            # 가격이 1개만 있으면 그것이 할인가
+                            discounted_price = price_values[0]
+                            original_price = discounted_price
 
                 if not discounted_price:
                     continue
