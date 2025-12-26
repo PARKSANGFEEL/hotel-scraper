@@ -40,10 +40,15 @@ def save_price_history(history):
         json.dump(history, f, ensure_ascii=False, indent=2)
 
 def clean_room_name(text):
-    m = re.search(r'^([^(]*\([^)]*\))', text)
-    if m:
-        return m.group(1).strip()
-    return text.strip()
+    # 객실명 정규화: 괄호, 공백, 대소문자, 한영 혼용 등 무시
+    import re
+    def normalize(s):
+        s = s.lower()
+        s = re.sub(r'[\[\]\(\){}<>]', '', s)  # 모든 괄호 제거
+        s = re.sub(r'\s+', '', s)  # 모든 공백 제거
+        s = re.sub(r'[^\w가-힣]', '', s)  # 한글, 영문, 숫자만 남김
+        return s
+    return normalize(text.strip())
 
 def scrape_hotel(hotel_id, hotel_info, checkin_date, driver):
     """특정 호텔의 가격 수집"""
@@ -111,41 +116,48 @@ def scrape_hotel(hotel_id, hotel_info, checkin_date, driver):
         results = []
         processed_rooms = {}
         
-        # 객실 이름 후보 요소 찾기
-        # h4 외에도 h3, span 등 다양한 태그에서 키워드 검색
-        # 검색 범위를 room_grid로 제한하면 좋지만, 없으면 body 전체
+        # 객실 이름 후보 요소 찾기 (h3, h4, span, div 모두 포함, span도 적극 포함)
         search_scope = room_grid if room_grid else driver.find_element(By.TAG_NAME, 'body')
-        
-        # h3, h4, span 태그 수집
         potential_elements = search_scope.find_elements(By.CSS_SELECTOR, 'h3, h4, span, div')
         print(f"총 {len(potential_elements)}개의 태그 검사 중 (키워드 필터링)...")
-        
+
+        # robust 객실명 매칭 함수 (clean_room_name 기반)
+        def is_room_match(a, b):
+            return clean_room_name(a) == clean_room_name(b)
+
+        # 필수 키워드 리스트 확장
+        valid_keywords = [
+            '룸', 'Room', 'Twin', '트윈', 'Double', '더블', 'Deluxe', '디럭스', 'Family', '패밀리',
+            'Suite', '스위트', '베드', 'Bed', '스탠다드', 'Standard', '도미토리', 'Studio', '스튜디오', 'Villa', '빌라', 'Cottage', '코티지'
+        ]
+
         count = 0
         for element in potential_elements:
             try:
                 text = element.text.strip()
-                if not text: continue
-                
+                # text가 비어있으면 aria-label, title 등도 후보로
+                if not text:
+                    text = element.get_attribute('aria-label') or element.get_attribute('title') or ''
+                    text = text.strip()
+                if not text:
+                    continue
+
                 # 1. 제외 키워드 필터링 (객실 상세 정보 등 제외)
                 if any(kw in text for kw in ['m²', '성인', '개', '크기', '전망', '침대', '흡연', '샤워', '욕조']):
                     continue
-                
+
                 # 2. 필수 키워드 필터링 (객실 이름에 포함될 법한 단어)
-                # 'Bed', '베드'는 제외 (침대 정보와 혼동됨)
-                # '싱글'도 '싱글베드' 때문에 위험하므로 '싱글룸'으로 변경하거나 주의
-                valid_keywords = ['룸', 'Room', 'Twin', 'Double', 'Deluxe', 'Family', 
-                                '스탠다드', '디럭스', '패밀리', 'Standard', 'Suite', '도미토리', 
-                                'Studio', '스튜디오', 'Villa', '빌라', 'Cottage', '코티지']
-                
                 if not any(kw in text for kw in valid_keywords):
                     continue
-                
-                # 너무 긴 텍스트는 제외 (설명글일 수 있음)
-                if len(text) > 50: continue
-                
+
+                # 너무 긴 텍스트도, 위 키워드가 포함되어 있으면 허용
+                if len(text) > 50 and not any(kw in text for kw in valid_keywords):
+                    continue
+
                 # 숫자만 있거나 너무 짧은 경우 제외
                 if len(text) < 3 or text.replace(',', '').isdigit(): continue
 
+                print(f"[후보 객실명 추출] {text}")
                 room_name = clean_room_name(text)
                 
                 # h4로부터 상위로 올라가며 객실 카드 컨테이너 찾기
@@ -168,80 +180,64 @@ def scrape_hotel(hotel_id, hotel_info, checkin_date, driver):
                 # 이미 처리한 카드인지 확인 (같은 카드 내에 여러 키워드가 있을 수 있음)
                 # 카드의 WebElement ID를 사용할 수도 있지만, 여기서는 room_name + price 조합으로 중복 체크
                 
+
                 original_price = None
                 discounted_price = None
-                
-                # 카드 내 텍스트에서 가격 추출
                 card_text = room_card.text
-                
-                # 1. 원가 추출 (취소선 가격) - 할부 가격 제외
+
+                # 1. 할인가: span.iwOmxK 우선
                 try:
-                    crossed_out = room_card.find_elements(By.CSS_SELECTOR, '[data-testid="crossed-out-price-text"], [data-testid="crossout-price"]')
-                    if crossed_out:
-                        original_price_text = crossed_out[0].text
-                        # 할부 관련 텍스트 제외
-                        if not any(x in original_price_text for x in ['월', 'month', '또는', 'installment']):
-                            m = re.search(r'([\d,]+)', original_price_text)
-                            if m:
-                                price_candidate = int(m.group(1).replace(',', ''))
-                                # 10,000원 이상의 합리적인 가격만 원가로 인정
-                                if price_candidate >= 10000:
-                                    original_price = price_candidate
+                    price_span = room_card.find_element(By.CSS_SELECTOR, 'span.iwOmxK')
+                    price_val = int(price_span.text.replace(',', '').replace('₩', '').strip())
+                    discounted_price = price_val
                 except:
                     pass
-                
-                # 2. 할인가 추출
-                # "₩ 123,456" 패턴 찾기
-                # 줄 단위로 분리하여 '월' 또는 'month'가 포함된 줄의 가격은 제외 (할부 가격 오인 방지)
-                lines = card_text.split('\n')
-                price_values = []
-                
-                for line in lines:
-                    # 할부/월 납입 관련 텍스트가 있는 줄은 건너뜀
-                    if any(x in line for x in ['월', 'month', 'installments', '또는', '부터', '개월']):
-                        continue
-                        
-                    found = re.findall(r'₩\s*([\d,]+)', line)
-                    for p in found:
-                        try:
-                            val = int(p.replace(',', ''))
-                            # 50,000원 미만은 할부 월 금액일 가능성 높음
-                            if val >= 50000:
-                                price_values.append(val)
-                        except:
-                            pass
-                
-                if not price_values:
-                     # Fallback: if strict filtering removed everything, try loose extraction
-                    prices = re.findall(r'₩\s*([\d,]+)', card_text)
-                    for p in prices:
-                        try:
-                            val = int(p.replace(',', ''))
-                            price_values.append(val)
-                        except:
-                            pass
 
-                if price_values:
-                    # 중복 제거 및 정렬
-                    price_values = sorted(list(set(price_values)), reverse=True)
-                    
-                    if original_price:
-                        # 원가가 있는 경우: 원가보다 작은 가격 중 가장 큰 값이 할인가
-                        candidates = [p for p in price_values if p < original_price and p != original_price]
-                        if candidates:
-                            discounted_price = max(candidates)
-                        else:
-                            # 원가보다 작은 가격이 없으면 가장 작은 가격을 할인가로
-                            discounted_price = min(price_values)
-                    else:
-                        # 원가가 없는 경우: 가격이 2개 이상이면 큰 값=원가, 작은 값=할인가
-                        if len(price_values) >= 2:
+                # 2. 원가: data-testid="crossout-price" 우선
+                try:
+                    crossed = room_card.find_element(By.CSS_SELECTOR, '[data-testid="crossout-price"]')
+                    orig_val = int(crossed.text.replace(',', '').replace('₩', '').strip())
+                    original_price = orig_val
+                except:
+                    pass
+
+                # 3. Fallback: 기존 방식 (여러 가격 후보 중 큰 값=원가, 작은 값=할인가)
+                if discounted_price is None or original_price is None:
+                    lines = card_text.split('\n')
+                    price_values = []
+                    for line in lines:
+                        if any(x in line for x in ['월', 'month', 'installments', '또는', '부터', '개월']):
+                            continue
+                        found = re.findall(r'₩\s*([\d,]+)', line)
+                        for p in found:
+                            try:
+                                val = int(p.replace(',', ''))
+                                if val >= 50000:
+                                    price_values.append(val)
+                            except:
+                                pass
+                    if not price_values:
+                        prices = re.findall(r'₩\s*([\d,]+)', card_text)
+                        for p in prices:
+                            try:
+                                val = int(p.replace(',', ''))
+                                price_values.append(val)
+                            except:
+                                pass
+                    if price_values:
+                        price_values = sorted(list(set(price_values)), reverse=True)
+                        if original_price is None and len(price_values) >= 2:
                             original_price = price_values[0]
-                            discounted_price = price_values[1]
-                        else:
-                            # 가격이 1개만 있으면 그것이 할인가
-                            discounted_price = price_values[0]
-                            original_price = discounted_price
+                        if discounted_price is None:
+                            if original_price is not None:
+                                candidates = [p for p in price_values if p < original_price]
+                                if candidates:
+                                    discounted_price = max(candidates)
+                                else:
+                                    discounted_price = min(price_values)
+                            else:
+                                discounted_price = price_values[0]
+                                original_price = discounted_price
 
                 if not discounted_price:
                     continue
